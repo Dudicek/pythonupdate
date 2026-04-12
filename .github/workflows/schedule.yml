@@ -1,4 +1,4 @@
-name: Run Python script every 15 minutes
+name: Update Steam prices
 
 on:
   schedule:
@@ -18,5 +18,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        run: |
+          pip install requests supabase
+
       - name: Run script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python script.py
