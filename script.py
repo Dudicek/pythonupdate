@@ -1,81 +1,150 @@
 import requests
 from supabase import create_client, Client
-import urllib.parse
-import time
-import re
 import os
 
 # --------------------------
-# Supabase nastavenie (SAFE verzia)
+# SUPABASE
 # --------------------------
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+API_KEY = os.environ["CS2_API_KEY"]
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# --------------------------
-# Funkcia na bezpečnú konverziu ceny
-# --------------------------
-def parse_price(price_str):
-    if not price_str:
-        return None
-
-    price_str = price_str.replace(",", ".").replace(" ", "")
-    match = re.search(r"\d+(\.\d+)?", price_str)
-
-    if match:
-        return float(match.group())
-
-    return None
+supabase: Client = create_client(
+    SUPABASE_URL,
+    SUPABASE_KEY
+)
 
 # --------------------------
-# Steam price fetch
+# SESSION (FASTER)
 # --------------------------
-def get_steam_price(market_hash_name):
-    name_enc = urllib.parse.quote(market_hash_name)
-    url = f"https://steamcommunity.com/market/priceoverview/?currency=3&appid=730&market_hash_name={name_enc}"
+session = requests.Session()
 
-    try:
-        resp = requests.get(url, timeout=10).json()
-
-        if resp.get("success"):
-            price_str = resp.get("lowest_price") or resp.get("median_price")
-            return parse_price(price_str)
-
-    except Exception as e:
-        print(f"Chyba pri {market_hash_name}: {e}")
-
-    return None
+session.headers.update({
+    "Authorization": f"Bearer {API_KEY}",
+    "Accept-Encoding": "gzip",
+    "Content-Type": "application/json",
+})
 
 # --------------------------
-# Načítanie skinov zo Supabase
+# EUR RATE (ONLY ONCE)
 # --------------------------
 try:
-    skins = supabase.table("skins").select("market_hash_name").execute().data
+    r = session.get(
+        "https://api.exchangerate.host/latest?base=USD&symbols=EUR",
+        timeout=10
+    )
+
+    EUR_RATE = r.json()["rates"]["EUR"]
+
+except Exception:
+    EUR_RATE = 0.92
+
+print(f"USD → EUR: {EUR_RATE}")
+
+# --------------------------
+# LOAD SKINS
+# --------------------------
+try:
+    skins = supabase.table("skins") \
+        .select("market_hash_name") \
+        .execute() \
+        .data
+
 except Exception as e:
-    print(f"Chyba Supabase fetch: {e}")
+    print("Supabase fetch error:", e)
     skins = []
 
+print(f"Načítaných skinov: {len(skins)}")
+
+if not skins:
+    print("❌ No skins")
+    exit()
+
 # --------------------------
-# Update cien
+# GET ALL SKIN NAMES
 # --------------------------
+skin_names = []
+
 for skin in skins:
+    name = skin.get("market_hash_name")
+
+    if name:
+        skin_names.append(name)
+
+# --------------------------
+# FETCH ALL PRICES AT ONCE
+# --------------------------
+try:
+    r = session.post(
+        "https://api.cs2.sh/v1/prices/latest",
+        json={"items": skin_names},
+        timeout=30
+    )
+
+    data = r.json()
+    items = data.get("items", {})
+
+except Exception as e:
+    print("API error:", e)
+    exit()
+
+# --------------------------
+# UPDATE PRICES
+# --------------------------
+updated = 0
+
+for skin in skins:
+
     market_hash_name = skin["market_hash_name"]
 
-    price = get_steam_price(market_hash_name)
+    item = None
 
-    if price is not None:
-        try:
-            supabase.table("skins") \
-                .update({"price": price}) \
-                .eq("market_hash_name", market_hash_name) \
-                .execute()
+    # exact match
+    if market_hash_name in items:
+        item = items[market_hash_name]
 
-            print(f"{market_hash_name} -> {price} €")
-
-        except Exception as e:
-            print(f"Update error {market_hash_name}: {e}")
     else:
-        print(f"Nezískaná cena: {market_hash_name}")
+        # fallback fix (AXIA etc.)
+        base_name = market_hash_name.split(" (")[0]
 
-    time.sleep(1)
+        for k, v in items.items():
+            if base_name.lower() in k.lower():
+                item = v
+                break
+
+    if not item:
+        print(f"❌ NOT FOUND: {market_hash_name}")
+        continue
+
+    # price priority
+    price_usd = (
+        item.get("buff", {}).get("ask")
+        or item.get("csfloat", {}).get("ask")
+        or item.get("steam", {}).get("ask")
+    )
+
+    if not price_usd:
+        print(f"❌ No price: {market_hash_name}")
+        continue
+
+    # USD -> EUR
+    price_eur = round(price_usd * EUR_RATE, 2)
+
+    try:
+        supabase.table("skins") \
+            .update({
+                "price": price_eur
+            }) \
+            .eq(
+                "market_hash_name",
+                market_hash_name
+            ) \
+            .execute()
+
+        print(f"{market_hash_name} -> {price_eur} €")
+        updated += 1
+
+    except Exception as e:
+        print(f"Update error {market_hash_name}: {e}")
+
+print(f"\n✅ UPDATED: {updated} skins")
