@@ -12,7 +12,7 @@ logging.basicConfig(
 )
 
 # --------------------------
-# CONFIG (GitHub Secrets)
+# CONFIG
 # --------------------------
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
@@ -22,9 +22,6 @@ CSFLOAT_LISTINGS_URL = "https://csfloat.com/api/v1/listings"
 
 REQUEST_DELAY = 1.0
 MAX_RETRIES = 5
-
-# USD -> EUR
-EUR_RATE = 0.92
 
 # --------------------------
 # SUPABASE
@@ -41,9 +38,6 @@ session.headers.update({
 })
 
 
-# --------------------------
-# CSFLOAT
-# --------------------------
 def get_lowest_csfloat_price(market_hash_name: str):
     params = {
         "market_hash_name": market_hash_name,
@@ -54,37 +48,32 @@ def get_lowest_csfloat_price(market_hash_name: str):
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = session.get(
+            resp = session.get(
                 CSFLOAT_LISTINGS_URL,
                 params=params,
                 timeout=15
             )
 
-            if response.status_code == 429:
-                retry_after = int(
-                    response.headers.get("Retry-After", 2 ** attempt)
-                )
-
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 2 ** attempt))
                 wait = retry_after + random.uniform(0, 0.5)
-
                 logging.warning(
-                    "Rate limit (%s). Waiting %.1fs...",
+                    "Rate limit %s → čakám %.1fs",
                     market_hash_name,
-                    wait,
+                    wait
                 )
-
                 time.sleep(wait)
                 continue
 
-            if response.status_code != 200:
+            if resp.status_code != 200:
                 logging.error(
-                    "CSFloat %d: %s",
-                    response.status_code,
-                    response.text[:200],
+                    "CSFloat error %d: %s",
+                    resp.status_code,
+                    resp.text[:200]
                 )
                 return None
 
-            data = response.json()
+            data = resp.json()
 
             if isinstance(data, dict):
                 listings = (
@@ -98,133 +87,128 @@ def get_lowest_csfloat_price(market_hash_name: str):
             if not listings:
                 return None
 
-            listing = listings[0]
+            first = listings[0]
 
-            if not isinstance(listing, dict):
+            if not isinstance(first, dict):
                 return None
 
-            price_cents = listing.get("price")
+            price_cents = first.get("price")
 
             if price_cents is None:
                 return None
 
+            # USD price
             usd_price = price_cents / 100
-            eur_price = usd_price * EUR_RATE
 
-            return round(eur_price, 2)
+            return round(usd_price, 2)
 
         except requests.exceptions.Timeout:
-            logging.warning("Timeout: %s", market_hash_name)
+            logging.warning("Timeout %s", market_hash_name)
             time.sleep(1)
 
         except requests.exceptions.RequestException as e:
-            logging.error("%s: %s", market_hash_name, e)
+            logging.error("Request error %s: %s", market_hash_name, e)
             time.sleep(1)
 
     return None
 
 
-# --------------------------
-# SUPABASE FUNCTIONS
-# --------------------------
 def fetch_all_skins():
     try:
-        response = (
-            supabase.table("skins")
+        resp = (
+            supabase
+            .table("skins")
             .select("market_hash_name, price")
             .execute()
         )
 
         return {
-            skin["market_hash_name"]: skin["price"]
-            for skin in response.data
+            s["market_hash_name"]: s["price"]
+            for s in resp.data
         }
 
     except Exception as e:
-        logging.critical("Supabase Error: %s", e)
+        logging.critical("Supabase error: %s", e)
         raise SystemExit(1)
 
 
-def update_skin_price(name: str, price: float):
+def update_skin_price(market_hash_name: str, price: float):
     try:
         (
-            supabase.table("skins")
+            supabase
+            .table("skins")
             .update({"price": price})
-            .eq("market_hash_name", name)
+            .eq("market_hash_name", market_hash_name)
             .execute()
         )
 
         return True
 
     except Exception as e:
-        logging.error("Update failed (%s): %s", name, e)
+        logging.error(
+            "Update error %s: %s",
+            market_hash_name,
+            e
+        )
         return False
 
 
-# --------------------------
-# MAIN
-# --------------------------
 def main():
-    logging.info("Starting CSFloat scraper...")
-    logging.info("Mode: BUY NOW")
-    logging.info("Currency: EUR")
+    logging.info("Spúšťam scraper (USD + BUY NOW MODE)")
 
     skins = fetch_all_skins()
 
     if not skins:
-        logging.warning("No skins found.")
+        logging.warning("Žiadne skiny v DB")
         return
 
-    total = len(skins)
-
-    logging.info("Loaded %d skins.", total)
+    logging.info("Načítaných %d skinov", len(skins))
 
     stats = {
         "updated": 0,
         "not_found": 0,
-        "failed": 0,
+        "failed": 0
     }
 
-    for index, (name, old_price) in enumerate(skins.items(), start=1):
+    for i, (name, old_price) in enumerate(skins.items(), start=1):
 
         new_price = get_lowest_csfloat_price(name)
 
         if new_price is None:
-
             logging.info(
-                "[%d/%d] %s -> NOT FOUND",
-                index,
-                total,
-                name,
+                "[%d/%d] %s: nenájdené",
+                i,
+                len(skins),
+                name
             )
-
             stats["not_found"] += 1
 
         else:
 
-            if update_skin_price(name, new_price):
+            ok = update_skin_price(name, new_price)
 
+            if ok:
                 logging.info(
-                    "[%d/%d] %s | %.2f€ -> %.2f€",
-                    index,
-                    total,
+                    "[%d/%d] %s: $%.2f → $%.2f",
+                    i,
+                    len(skins),
                     name,
-                    old_price,
-                    new_price,
+                    float(old_price),
+                    new_price
                 )
-
                 stats["updated"] += 1
-
             else:
                 stats["failed"] += 1
 
         time.sleep(REQUEST_DELAY)
 
-    logging.info("-" * 60)
-    logging.info("FINISHED")
-    logging.info("Updated   : %d", stats["updated"])
-    logging.info("Not Found : %d", stats["not_found"])
-    logging.info("Failed    : %d", stats["failed"])
+    logging.info("=" * 60)
+    logging.info(
+        "HOTOVO → updated=%d not_found=%d failed=%d",
+        stats["updated"],
+        stats["not_found"],
+        stats["failed"]
+    )
 
 
 if __name__ == "__main__":
