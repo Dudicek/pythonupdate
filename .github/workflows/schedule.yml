@@ -20,11 +20,12 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install requests supabase
 
       - name: Run script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          CS2_API_KEY: ${{ secrets.CS2_API_KEY }}
+          CSFLOAT_API_KEY: ${{ secrets.CSFLOAT_API_KEY }}
         run: python script.py
